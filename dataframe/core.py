@@ -17,21 +17,28 @@ except ImportError:
 
 
 class _ColumnProxy:
-    """Proxy object for column data with comparison operators."""
+    """Proxy object for column data with comparison operators (NumPy-optimized)."""
 
-    def __init__(self, data: List[Any], df: 'DataFrame'):
-        self._data = data
+    def __init__(self, data: Union[List[Any], 'np.ndarray'], df: 'DataFrame'):
+        # Support both list and NumPy array input
+        if HAS_NUMPY and isinstance(data, np.ndarray):
+            self._data = data  # Already a NumPy array
+            self._numpy_array = data  # Cache reference
+        else:
+            self._data = data  # Python list
+            self._numpy_array = None
         self._df = df
-        self._numpy_array = None  # Cache NumPy array for comparisons
 
     def __gt__(self, other):
-        if HAS_NUMPY and len(self._data) > 10000:
+        if HAS_NUMPY:
             try:
-                # Use NumPy for fast comparison and keep the array
-                arr = np.array(self._data)
-                result = arr > other
-                # Create a new ColumnProxy with NumPy array
-                proxy = _ColumnProxy(result.tolist(), self._df)
+                # Use NumPy array directly if available, otherwise convert
+                if isinstance(self._data, np.ndarray):
+                    result = self._data > other
+                else:
+                    result = np.array(self._data) > other
+                # Return new ColumnProxy with NumPy result
+                proxy = _ColumnProxy(result, self._df)
                 proxy._numpy_array = result
                 return proxy
             except (TypeError, ValueError):
@@ -39,46 +46,71 @@ class _ColumnProxy:
         return [x > other for x in self._data]
 
     def __lt__(self, other):
-        if HAS_NUMPY and len(self._data) > 10000:
+        if HAS_NUMPY:
             try:
-                arr = np.array(self._data)
-                return (arr < other).tolist()
+                if isinstance(self._data, np.ndarray):
+                    result = self._data < other
+                else:
+                    result = np.array(self._data) < other
+                proxy = _ColumnProxy(result, self._df)
+                proxy._numpy_array = result
+                return proxy
             except (TypeError, ValueError):
                 return [x < other for x in self._data]
         return [x < other for x in self._data]
 
     def __ge__(self, other):
-        if HAS_NUMPY and len(self._data) > 10000:
+        if HAS_NUMPY:
             try:
-                arr = np.array(self._data)
-                return (arr >= other).tolist()
+                if isinstance(self._data, np.ndarray):
+                    result = self._data >= other
+                else:
+                    result = np.array(self._data) >= other
+                proxy = _ColumnProxy(result, self._df)
+                proxy._numpy_array = result
+                return proxy
             except (TypeError, ValueError):
                 return [x >= other for x in self._data]
         return [x >= other for x in self._data]
 
     def __le__(self, other):
-        if HAS_NUMPY and len(self._data) > 10000:
+        if HAS_NUMPY:
             try:
-                arr = np.array(self._data)
-                return (arr <= other).tolist()
+                if isinstance(self._data, np.ndarray):
+                    result = self._data <= other
+                else:
+                    result = np.array(self._data) <= other
+                proxy = _ColumnProxy(result, self._df)
+                proxy._numpy_array = result
+                return proxy
             except (TypeError, ValueError):
                 return [x <= other for x in self._data]
         return [x <= other for x in self._data]
 
     def __eq__(self, other):
-        if HAS_NUMPY and len(self._data) > 10000:
+        if HAS_NUMPY:
             try:
-                arr = np.array(self._data)
-                return (arr == other).tolist()
+                if isinstance(self._data, np.ndarray):
+                    result = self._data == other
+                else:
+                    result = np.array(self._data) == other
+                proxy = _ColumnProxy(result, self._df)
+                proxy._numpy_array = result
+                return proxy
             except (TypeError, ValueError):
                 return [x == other for x in self._data]
         return [x == other for x in self._data]
 
     def __ne__(self, other):
-        if HAS_NUMPY and len(self._data) > 10000:
+        if HAS_NUMPY:
             try:
-                arr = np.array(self._data)
-                return (arr != other).tolist()
+                if isinstance(self._data, np.ndarray):
+                    result = self._data != other
+                else:
+                    result = np.array(self._data) != other
+                proxy = _ColumnProxy(result, self._df)
+                proxy._numpy_array = result
+                return proxy
             except (TypeError, ValueError):
                 return [x != other for x in self._data]
         return [x != other for x in self._data]
@@ -160,8 +192,15 @@ class DataFrame:
                 - List of dicts (row-oriented data)
         """
         if isinstance(data, dict):
-            # Column-oriented data
-            self._data: Dict[str, List[Any]] = {k: list(v) for k, v in data.items()}
+            # Column-oriented data - convert to NumPy arrays
+            self._data: Dict[str, np.ndarray] = {}
+            for k, v in data.items():
+                try:
+                    # Try to convert to NumPy array
+                    self._data[k] = np.array(list(v))
+                except (TypeError, ValueError):
+                    # For non-numeric data, keep as object array
+                    self._data[k] = np.array(list(v), dtype=object)
             self._validate_column_oriented()
         elif isinstance(data, list):
             # Row-oriented data
@@ -177,8 +216,8 @@ class DataFrame:
         if len(set(lengths)) > 1:
             raise ValueError("All columns must have the same length")
 
-    def _from_row_oriented(self, data: List[Dict[str, Any]]) -> Dict[str, List[Any]]:
-        """Convert row-oriented data to column-oriented."""
+    def _from_row_oriented(self, data: List[Dict[str, Any]]) -> Dict[str, np.ndarray]:
+        """Convert row-oriented data to column-oriented NumPy arrays."""
         if not data:
             return {}
         columns = {}
@@ -187,7 +226,15 @@ class DataFrame:
                 if key not in columns:
                     columns[key] = []
                 columns[key].append(value)
-        return columns
+
+        # Convert lists to NumPy arrays
+        result = {}
+        for k, v in columns.items():
+            try:
+                result[k] = np.array(v)
+            except (TypeError, ValueError):
+                result[k] = np.array(v, dtype=object)
+        return result
 
     @property
     def columns(self) -> List[str]:
@@ -207,7 +254,8 @@ class DataFrame:
         if not self._data:
             return []
         n_rows = self.shape[0]
-        return [[self._data[col][i] for col in self.columns] for i in range(n_rows)]
+        return [[self._data[col][i].item() if hasattr(self._data[col][i], 'item') else self._data[col][i]
+                for col in self.columns] for i in range(n_rows)]
 
     def __len__(self) -> int:
         """Return number of rows."""
@@ -226,8 +274,11 @@ class DataFrame:
     def __getitem__(self, key: Union[str, List[str], slice, List[bool], '_ColumnProxy']) -> Any:
         """Get column(s) or rows by slicing or boolean indexing."""
         if isinstance(key, str):
-            # Single column - return ColumnProxy for comparison support
-            return _ColumnProxy(list(self._data.get(key, [])), self)
+            # Single column - return NumPy array directly wrapped in ColumnProxy
+            col_data = self._data.get(key)
+            if col_data is None:
+                return _ColumnProxy([], self)
+            return _ColumnProxy(col_data, self)
         elif isinstance(key, list):
             # Check if it's a boolean list for filtering
             if len(key) > 0 and isinstance(key[0], bool):
@@ -236,22 +287,17 @@ class DataFrame:
                     raise ValueError(f"Boolean array length {len(key)} doesn't match DataFrame length {len(self)}")
                 return self._select_rows_by_boolean(key)
             else:
-                # Multiple columns
-                return DataFrame({k: list(self._data[k]) for k in key if k in self._data})
+                # Multiple columns - keep as NumPy arrays
+                return DataFrame({k: self._data[k].copy() for k in key if k in self._data})
         elif isinstance(key, _ColumnProxy):
             # Boolean indexing from ColumnProxy - check for NumPy array
             if HAS_NUMPY and hasattr(key, '_numpy_array') and key._numpy_array is not None:
                 # Use NumPy array directly for faster indexing
                 indices = np.where(key._numpy_array)[0]
-                # Fast path with NumPy indices
+                # Fast path with NumPy indices (no conversion overhead)
                 new_data = {}
                 for col in self.columns:
-                    col_data = self._data[col]
-                    try:
-                        arr = np.array(col_data)
-                        new_data[col] = arr[indices].tolist()
-                    except (TypeError, ValueError):
-                        new_data[col] = [col_data[i] for i in indices]
+                    new_data[col] = self._data[col][indices]
                 return DataFrame(new_data)
             else:
                 # Fall back to regular boolean indexing
@@ -263,6 +309,7 @@ class DataFrame:
             stop = key.stop if key.stop else len(self)
             step = key.step if key.step else 1
             return self.iloc[start:stop:step]
+        raise TypeError(f"Invalid key type: {type(key)}")
         raise TypeError(f"Invalid key type: {type(key)}")
 
     def __setitem__(self, key: str, value: List[Any]):
@@ -315,7 +362,7 @@ class DataFrame:
 
     def _select_rows_by_boolean(self, bool_list: List[bool]) -> 'DataFrame':
         """
-        Select rows by boolean mask (optimized for filter operations).
+        Select rows by boolean mask (optimized for NumPy-backed storage).
 
         Args:
             bool_list: List of booleans indicating which rows to keep
@@ -323,29 +370,16 @@ class DataFrame:
         Returns:
             New DataFrame with filtered rows
         """
-        # Use NumPy if available for faster boolean indexing
-        if HAS_NUMPY and len(bool_list) > 10000:  # Only for large DataFrames
-            bool_array = np.array(bool_list, dtype=bool)
-            indices = np.where(bool_array)[0]  # Much faster than enumerate
+        # Convert boolean list to NumPy array for indexing
+        bool_array = np.array(bool_list, dtype=bool)
+        indices = np.where(bool_array)[0]
 
-            new_data = {}
-            for col in self.columns:
-                col_data = self._data[col]
-                # Use NumPy advanced indexing
-                try:
-                    arr = np.array(col_data)
-                    new_data[col] = arr[indices].tolist()
-                except (TypeError, ValueError):
-                    # Fall back for non-numeric data
-                    new_data[col] = [col_data[i] for i in indices]
-            return DataFrame(new_data)
-        else:
-            # Pure Python implementation for small DataFrames
-            new_data = {}
-            for col in self.columns:
-                col_data = self._data[col]
-                new_data[col] = [val for val, keep in zip(col_data, bool_list) if keep]
-            return DataFrame(new_data)
+        # Direct NumPy indexing (no conversion overhead)
+        new_data = {}
+        for col in self.columns:
+            col_array = self._data[col]
+            new_data[col] = col_array[indices]
+        return DataFrame(new_data)
 
     def loc(self, condition: Callable[[Dict[str, Any]], bool]) -> 'DataFrame':
         """
@@ -483,9 +517,21 @@ class DataFrame:
         """
         if orient == "records":
             # Return list of dicts (row-oriented)
-            return [{col: self._data[col][i] for col in self.columns} for i in range(len(self))]
+            result = []
+            for i in range(len(self)):
+                row = {}
+                for col in self.columns:
+                    val = self._data[col][i]
+                    # Convert NumPy scalar to Python value
+                    if hasattr(val, 'item'):
+                        row[col] = val.item()
+                    else:
+                        row[col] = val
+                result.append(row)
+            return result
         elif orient == "dict":
-            return {k: list(v) for k, v in self._data.items()}
+            # Convert NumPy arrays to lists
+            return {k: v.tolist() for k, v in self._data.items()}
         raise ValueError(f"Invalid orient: {orient}. Use 'records' or 'dict'")
 
     def to_csv(self, path: str, index: bool = False):
@@ -500,7 +546,14 @@ class DataFrame:
             writer = csv.DictWriter(f, fieldnames=self.columns)
             writer.writeheader()
             for i in range(len(self)):
-                row = {col: self._data[col][i] for col in self.columns}
+                row = {}
+                for col in self.columns:
+                    val = self._data[col][i]
+                    # Convert NumPy scalar to Python value
+                    if hasattr(val, 'item'):
+                        row[col] = val.item()
+                    else:
+                        row[col] = val
                 writer.writerow(row)
 
     @staticmethod
